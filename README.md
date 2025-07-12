@@ -10,6 +10,6 @@ https://www.bilibili.com/video/BV1PhGLzhEAd/
 
 https://www.bilibili.com/video/BV1XYGNzEEhJ/
 
-![封面](images/cover.png)
+![封面](images/cover.jpg)
 
-![Snipaste_2025-07-08_01-43-28](images/Snipaste_2025-07-08_01-43-28.png)
+![Snipaste_2025-07-08_01-43-28](images/Snipaste_2025-07-08_01-43-28.jpg)
