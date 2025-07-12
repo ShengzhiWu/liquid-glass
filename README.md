@@ -10,6 +10,12 @@ https://www.bilibili.com/video/BV1PhGLzhEAd/
 
 https://www.bilibili.com/video/BV1XYGNzEEhJ/
 
+Online demo：
+
+https://shengzhiwu.github.io/liquid-glass
+
+https://shengzhiwu.github.io/liquid-glass-slider
+
 ![封面](images/cover.jpg)
 
 ![Snipaste_2025-07-08_01-43-28](images/Snipaste_2025-07-08_01-43-28.jpg)
