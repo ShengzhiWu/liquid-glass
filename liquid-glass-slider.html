@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Liquid Glass Slider</title>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        
+        .progress-container {
+            width: 100%; /* 左右各100px空白 */
+            margin: calc((100% - 61.8%) / 2); /* 左右各100px空白 */
+        }
+        
+        .progress-background {
+            stroke: #d8d8d8;
+            stroke-linecap: round;
+        }
+        
+        .progress-foreground {
+            stroke: #399bf6;
+            stroke-linecap: round;
+            /* transition: stroke-dashoffset 0.3s ease; */
+        }
+        
+        svg {
+            width: 100%;
+            display: block;
+        }
+        
+        #liquid-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 1;
+            pointer-events: none;
+        }
+        
+        #liquid-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <!-- 这里写的内容将被 html2canvas 捕获成为液体折射的背景 -->
+    <!-- 注意更新并非自动的，需要调用 captureAndProcess 函数来重新捕获背景 -->
+    <div class="progress-container">
+        <svg viewBox="0 0 300 10">
+            <!-- svg 元素里的长度单位不是像素 -->
+            <!-- 背景线 -->
+            <line class="progress-background" x1="5" y1="5" x2="295" y2="5" stroke-width="10" />
+            <!-- 前景线（进度部分） -->
+            <line class="progress-foreground" x1="5" y1="5" x2="295" y2="5" stroke-width="10" 
+                  stroke-dasharray="290" stroke-dashoffset="290" />  <!-- stroke-dashoffset 属性决定了进度。初始进度为 0 -->
+        </svg>
+    </div>
+
+    <script>
+        const progressSvg = document.querySelector('.progress-container svg');
+
+        function getProgress() {  // 获取进度条进度，0 ~ 1
+            const foreground = document.querySelector('.progress-foreground');
+            const offset = foreground.getAttribute('stroke-dashoffset');
+            return 1 - offset / 290;
+        }
+
+        function getProgressX() {  // 获取进度条临界点的在整个页面中的横坐标
+            const rect = progressSvg.getBoundingClientRect();
+
+            return rect.left + getProgress() * rect.width;
+        }
+
+        function getProgressY() {  // 获取进度条临界点的在整个页面中的纵坐标
+            const rect = progressSvg.getBoundingClientRect();
+
+            return rect.top + rect.height / 2;
+        }
+
+        function setProgress(t) {  // 设置进度条进度，0 ~ 1
+            const foreground = document.querySelector('.progress-foreground');
+
+            const offset = 290 * (1 - Math.min(1, Math.max(0, t)));  // 290 = 295 - 5
+            foreground.setAttribute('stroke-dashoffset', offset);
+        }
+
+        function setProgressX(x) {  // 设置进度条临界点的在整个页面中的横坐标
+            const rect = progressSvg.getBoundingClientRect();
+
+            return setProgress((x - rect.left) / rect.width);
+        }
+
+        setProgress(0.5);
+    </script>
+
+    <div id="liquid-container">
+        <canvas id="liquid-canvas"></canvas>
+    </div>
+
+    <canvas id="particle-anvas" style="position: fixed; top: 0; left: 0; z-index: 2;"></canvas>
+
+    <!-- 从 CDN 加载必要的库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <script>
+        // 基本参数
+        const particleNum = 15;
+
+        // 渲染参数
+        const particleRenderRadius = 50;  // 液体球的显示直径
+        const refractionStrengthR = '470.';  // 红光折射强度（pixel）
+        const refractionStrengthG = '500.';  // 绿光折射强度（pixel）
+        const refractionStrengthB = '530.';  // 蓝光折射强度（pixel）
+        const dropletBendingParameter = '2.';  // 液滴弯曲参数，>= 0
+        const dropletEdgeBendingParameter = '5.';  // 液滴边缘弯曲参数，>= 0
+        const dropletEdgeSharpnessParameter = '20.';  // 液滴边缘弯曲参数，>= 0，越大边缘弯曲部分越窄
+
+        // 物理仿真部分
+        
+        const liquidCanvas = document.getElementById('liquid-canvas');
+        var particles = {
+            location: Array.from({length: particleNum}, () => [
+                (0.5 + (Math.random() - 0.5) * 0.3) * liquidCanvas.clientWidth,
+                (0.5 + (Math.random() - 0.5) * 0.3) * liquidCanvas.clientHeight
+            ])
+        };
+        particles.velocity = Array.from({length: particles.location.length}, () => [0, 0]);
+
+        // 物理参数
+        const dt = 0.5;  // 时间步长
+        const targetDistance = 40;  // 排斥作用距离阈值
+        const attractionPeak = 100;  // 吸引力峰值距离
+        const attractionEnd = 200;  // 吸引力归零距离
+        const forceScale1 = 2;  // 排斥力大小缩放因子
+        const forceScale2 = 0.5;  // 吸引力大小缩放因子
+        const damping = 0.03;  // 阻尼
+        const speedMax = 30;
+        const viscosityStrength = 0.03;  // 黏性
+        const viscosityEnd = 100;
+        const boundaryMargin = particleRenderRadius;  // 边界留白
+
+        // 进度条相关的物理参数
+        const progressAttractionEnd = 200;  // 粒子和进度条的吸引力归零距离
+        const progressAttractionSharpness = 100;
+        const progressForceScale1 = 0.1;  // 粒子对进度条的吸引力系数
+        const progressForceScale2 = 0.002;  // 进度条对粒子的吸引力系数
+
+        const bodyWidth = liquidCanvas.clientWidth - boundaryMargin;
+        const bodyHeight = liquidCanvas.clientHeight - boundaryMargin;
+
+        function oneStep() {
+            // 阻尼
+            for (let i = 0; i < particleNum; i++) {
+                particles.velocity[i][0] *= 1 - damping * dt;
+                particles.velocity[i][1] *= 1 - damping * dt;
+            }
+
+            // 粒子间相互作用力
+            for (let i = 0; i < particleNum; i++) {
+                const posA = particles.location[i];
+                // 遍历其他粒子计算相互作用
+                for (let j = i + 1; j < particleNum; j++) {
+                    const posB = particles.location[j];
+                    const dx = posB[0] - posA[0];
+                    const dy = posB[1] - posA[1];
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    // 黏性（近距离粒子速度同化）
+                    if (dist < viscosityEnd) {
+                        let strength = viscosityStrength * (1 - dist / viscosityEnd);
+                        if (dragState.active)
+                            if (dragState.particleIndex == i || dragState.particleIndex == j)
+                                strength *= dragViscosityFactor;
+                        const impactX = (particles.velocity[j][0] - particles.velocity[i][0]) * strength * dt;
+                        const impactY = (particles.velocity[j][1] - particles.velocity[i][1]) * strength * dt;
+                        particles.velocity[i][0] += impactX;
+                        particles.velocity[i][1] += impactY;
+                        particles.velocity[j][0] -= impactX;
+                        particles.velocity[j][1] -= impactY;
+                    }
+
+                    // 距离相关力计算
+                    if (dist < targetDistance) {
+                        // 近距离排斥（力大小与距离负线性相关）
+                        const force = forceScale1 * (targetDistance - dist) / dist;
+                        const impactX = - dx * force * dt;
+                        const impactY = - dy * force * dt;
+                        particles.velocity[i][0] += impactX;
+                        particles.velocity[i][1] += impactY;
+                        particles.velocity[j][0] -= impactX;
+                        particles.velocity[j][1] -= impactY;
+                    } 
+                    else if (dist < attractionEnd) {
+                        // 中距离吸引（先增后减的力）
+                        let force;
+                        if (dist < attractionPeak) {
+                            force = forceScale2 * (dist - targetDistance) / attractionPeak;
+                        } else {
+                            force = forceScale2 * (attractionEnd - dist) / (attractionEnd - attractionPeak);
+                        }
+                        
+                        const impactX = dx * force / dist * dt;
+                        const impactY = dy * force / dist * dt;
+                        particles.velocity[i][0] += impactX;
+                        particles.velocity[i][1] += impactY;
+                        particles.velocity[j][0] -= impactX;
+                        particles.velocity[j][1] -= impactY;
+                    }
+                }
+            }
+
+            // 粒子与进度条的相互作用
+            const posA = [getProgressX(), getProgressY()];
+            let progressSpeed = 0;
+            for (let i = 0; i < particleNum; i++) {
+                const posB = particles.location[i];
+                const dx = posB[0] - posA[0];
+                const dy = posB[1] - posA[1];
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < progressAttractionEnd) {
+                    let factor = 1 - dist / progressAttractionEnd;
+                    factor = Math.min(1, factor * progressAttractionSharpness);
+                    progressSpeed += dx * factor * progressForceScale1;
+                    particles.velocity[i][0] -= dx * factor * progressForceScale2 * dt;
+                    particles.velocity[i][1] -= dy * factor * progressForceScale2 * dt;
+                }
+            }
+            setProgressX(posA[0] + progressSpeed * dt);
+
+            // 鼠标拖拽
+            if (dragState.active) {
+                const dx = dragState.target[0] - particles.location[dragState.particleIndex][0];
+                const dy = dragState.target[1] - particles.location[dragState.particleIndex][1];
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                // 为被拖拽的粒子设置额外阻尼
+                if (dist < particleRenderRadius * 2.) {
+                    particles.velocity[dragState.particleIndex][0] *= 0.8;
+                    particles.velocity[dragState.particleIndex][1] *= 0.8;
+                }
+                
+                // 施加与距离成正比的力
+                particles.velocity[dragState.particleIndex][0] += dx * dragStrength;
+                particles.velocity[dragState.particleIndex][1] += dy * dragStrength;
+            }
+            
+            // 最大速度限制
+            // for (let i = 0; i < particleNum; i++) {
+            //     const speed = Math.sqrt(particles.velocity[i][0] ** 2 + particles.velocity[i][1] ** 2);
+            //     if (speed > speedMax) {
+            //         const factor = speedMax / speed;
+            //         particles.velocity[i][0] *= factor;
+            //         particles.velocity[i][1] *= factor;
+            //     }
+            // }
+
+            // 更新位置并处理边界约束
+            for (let i = 0; i < particleNum; i++) {
+                const pos = particles.location[i];
+                const vel = particles.velocity[i];
+
+                // 惯性运动
+                pos[0] += vel[0] * dt;
+                pos[1] += vel[1] * dt;
+
+                // 边界约束（弹性碰撞）
+                if (pos[0] < boundaryMargin) {
+                    pos[0] = boundaryMargin;
+                    vel[0] *= -0.5; // 边界能量损失
+                } else if (pos[0] > bodyWidth) {
+                    pos[0] = bodyWidth;
+                    vel[0] *= -0.5;
+                }
+
+                if (pos[1] < boundaryMargin) {
+                    pos[1] = boundaryMargin;
+                    vel[1] *= -0.5;
+                } else if (pos[1] > bodyHeight) {
+                    pos[1] = bodyHeight;
+                    vel[1] *= -0.5;
+                }
+            }
+        }
+
+        // 获取Canvas上下文
+        const canvas = document.getElementById('particle-anvas');  // 用于绘制粒子位置、速度的canvas
+        const ctx = canvas.getContext('2d');
+
+        // 设置Canvas尺寸为body大小
+        function resizeCanvas() {
+            const liquidCanvas = document.getElementById('liquid-canvas');
+            canvas.width = liquidCanvas.clientWidth;
+            canvas.height = liquidCanvas.clientHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // 绘制粒子函数
+        function drawParticles(particles) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // 清空画布
+            
+            particles.location.forEach((pos, i) => {
+                // 如果有颜色数组则使用，否则默认蓝色
+                const color = particles.color?.[i] || '#3498db';
+                
+                ctx.beginPath();
+                ctx.arc(pos[0], pos[1], 3, 0, Math.PI * 2); // 半径3px的圆
+                ctx.fillStyle = color;
+                ctx.fill();
+                
+                // 可选：绘制速度向量（调试用）
+                if (particles.velocity) {
+                    ctx.beginPath();
+                    ctx.moveTo(pos[0], pos[1]);
+                    ctx.lineTo(
+                        pos[0] + particles.velocity[i][0] * 5, 
+                        pos[1] + particles.velocity[i][1] * 5
+                    );
+                    ctx.strokeStyle = '#e74c3c';
+                    ctx.stroke();
+                }
+            });
+        }
+
+        // 交互部分
+
+        // 拖拽状态记录
+        const dragStrength = 0.2;
+        const dragViscosityFactor = 10;
+        const dragState = {
+            active: false,
+            particleIndex: undefined,
+            offset: undefined,
+            target: undefined
+        };
+
+        // 鼠标按下事件
+        canvas.addEventListener('mousedown', (e) => {
+            const mouseX = e.clientX;
+            const mouseY = e.clientY;
+            const threshold = particleRenderRadius; // 触发拖拽的最大像素距离
+            
+            let closestDist = Infinity;
+            let closestIndex = undefined;
+            
+            // 寻找最近的粒子
+            particles.location.forEach((pos, i) => {
+                const dx = pos[0] - mouseX;
+                const dy = pos[1] - mouseY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                
+                if (dist < threshold && dist < closestDist) {
+                    closestDist = dist;
+                    closestIndex = i;
+                }
+            });
+            
+            if (closestIndex != undefined) {
+                dragState.particleIndex = closestIndex;
+                // 记录鼠标与粒子的相对偏移（保持初始位移）
+                dragState.offset = [particles.location[closestIndex][0] - mouseX, particles.location[closestIndex][1] - mouseY];
+                dragState.target = [...particles.location[closestIndex]];
+                dragState.active = true;
+            }
+        });
+
+        // 鼠标移动事件（牵引粒子）
+        canvas.addEventListener('mousemove', (e) => {
+            if (!dragState.active) return;
+            
+            const mouseX = e.clientX;
+            const mouseY = e.clientY;
+            
+            // 计算目标位置（保持初始偏移）
+            const targetX = mouseX + dragState.offset[0];
+            const targetY = mouseY + dragState.offset[1];
+            dragState.target = [targetX, targetY];
+        });
+
+        // 鼠标释放事件
+        canvas.addEventListener('mouseup', () => {
+            dragState.active = false;
+        });
+
+        // 渲染部分
+
+        var texture;
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const liquidContainer = document.getElementById('liquid-container');
+            const liquidCanvas = document.getElementById('liquid-canvas');
+            
+            // 液滴折射着色器
+            const liquidShader = {
+                uniforms: {
+                    "tDiffuse": { value: null },
+                    "resolution": { value: new THREE.Vector2() },
+                    "direction": { value: new THREE.Vector2() },
+                    "radius": { value: particleRenderRadius },
+                    "particles": { value: particles.location.map(e => new THREE.Vector2(e[0], liquidCanvas.clientHeight - e[1])) }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D tDiffuse;
+                    uniform vec2 resolution;
+                    uniform vec2 direction;
+                    uniform float radius;
+                    uniform vec2 particles[${particles.location.length}];
+                    varying vec2 vUv;
+                    
+                    float gaussian(vec2 x, float sigma) {
+                        return exp(-dot(x, x) / (2.0 * sigma * sigma));  // 未归一化的高斯核
+                    }
+                    
+                    void main() {
+                        vec2 pixelSize = vec2(1.0) / resolution;
+                        
+                        float sum = 0.;
+                        vec2 normal = vec2(0., 0.);
+                        for (int i = 0; i < ${particles.location.length}; i ++) {
+                            vec2 d = vUv * resolution - particles[i];
+                            float weight = gaussian(d, radius);
+                            sum += weight;
+                            normal += d * weight;
+                        }
+                        normal *= 0.01 / sum;
+                        normal *= pow(length(normal), ${dropletBendingParameter});
+                        normal *= 1. + ${dropletEdgeBendingParameter} * exp(- ${dropletEdgeSharpnessParameter} * (sum - 0.7));
+
+                        if (sum > 0.7) {
+                            // 简单阴影
+                            gl_FragColor = texture2D(tDiffuse, vUv) * 0.1;
+
+                            // 法向
+                            // gl_FragColor = vec4(clamp(normal * 3., -1.0, 1.0) * 0.5 + 0.5, 1., 1.);
+
+                            // 不带色散的折射
+                            // gl_FragColor = texture2D(tDiffuse, vUv - normal * pixelSize * ${refractionStrengthG});
+
+                            // 带色散的折射
+                            // gl_FragColor = vec4(
+                            //     texture2D(tDiffuse, vUv - normal * pixelSize * ${refractionStrengthR}).x,
+                            //     texture2D(tDiffuse, vUv - normal * pixelSize * ${refractionStrengthG}).y,
+                            //     texture2D(tDiffuse, vUv - normal * pixelSize * ${refractionStrengthB}).z,
+                            //     1.
+                            // );
+                            // gl_FragColor.xyz = gl_FragColor.xyz * 0.95;  // 略暗于背景
+
+                            // 高光
+                            // if (normal.x > 0. && normal.x < 0.05 && normal.y > 0.05 && normal.y < 0.3)
+                            // if (length(normal - vec2(0.05, 0.1)) < 0.05)
+                            //     gl_FragColor.xyz += 0.8;
+                            // if (length(normal - vec2(-0.1, -0.2)) < 0.05)
+                            //     gl_FragColor.xyz += 0.8;
+                        }
+                        else
+                            gl_FragColor = texture2D(tDiffuse, vUv);
+                    }
+                `
+            };
+            
+            // 初始化Three.js场景
+            function initThreeJS() {
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+                
+                // 创建渲染器
+                const renderer = new THREE.WebGLRenderer({
+                    antialias: false,
+                    canvas: liquidCanvas
+                });
+                renderer.setSize(width, height);
+                renderer.setClearColor(0x000000, 0);
+                
+                // 创建场景和相机
+                const scene = new THREE.Scene();
+                const camera = new THREE.OrthographicCamera(-width/2, width/2, height/2, -height/2, 1, 1000);
+                camera.position.z = 100;
+                
+                // 创建平面几何体
+                const geometry = new THREE.PlaneGeometry(width, height);
+                
+                // 材质                
+                const material = new THREE.ShaderMaterial({
+                    uniforms: THREE.UniformsUtils.clone(liquidShader.uniforms),
+                    vertexShader: liquidShader.vertexShader,
+                    fragmentShader: liquidShader.fragmentShader
+                });
+                
+                material.uniforms.resolution.value.set(width, height);
+                material.uniforms.direction.value.set(0.0, 1.0);
+                
+                // 创建两个Mesh用于双Pass渲染
+                const mesh = new THREE.Mesh(geometry, material);
+                
+                // 渲染函数
+                function render(texture) {
+                    material.uniforms.tDiffuse.value = texture;
+                    scene.add(mesh);
+                    renderer.render(scene, camera);
+                    scene.remove(mesh);
+                }
+                
+                return {render, material};
+            }
+
+            const {render, material} = initThreeJS();
+            
+            // 捕获页面内容并创建纹理，纹理用于计算折射。在你希望背景更新时调用这个函数，但注意这个函数比较耗时
+            function captureAndProcess() {
+                // 临时添加白色背景确保捕获时不透明
+                const originalBg = document.body.style.backgroundColor;
+                document.body.style.backgroundColor = 'white';
+                
+                // 获取可视区域尺寸
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+                
+                html2canvas(document.body, {
+                    scale: 1,
+                    logging: false,
+                    useCORS: true,
+                    allowTaint: false,
+                    backgroundColor: '#FFFFFF',
+                    windowWidth: width,
+                    windowHeight: height,
+                    width: width,
+                    height: height,
+                    ignoreElements: (element) => element === liquidContainer
+                }).then(canvas => {
+                    document.body.style.backgroundColor = originalBg;
+                    
+                    // 创建Three.js纹理
+                    texture = new THREE.CanvasTexture(canvas);
+                    texture.minFilter = THREE.LinearFilter;
+                    texture.magFilter = THREE.LinearFilter;
+                    
+                    render(texture);
+                }).catch(err => {
+                    console.error('捕获内容失败:', err);
+                    document.body.style.backgroundColor = originalBg;
+                });
+            }
+            
+            // 用于确保在截图时页面所有图片都已加载完成的函数
+            function preloadImages() {
+                return new Promise((resolve) => {
+                    const images = document.querySelectorAll('img');
+                    let loadedCount = 0;
+                    
+                    if (images.length === 0) resolve();
+                    
+                    images.forEach(img => {
+                        if (img.complete) {
+                            loadedCount++;
+                        } else {
+                            img.onload = () => {
+                                loadedCount++;
+                                if (loadedCount === images.length) resolve();
+                            };
+                            img.onerror = () => {
+                                loadedCount++;
+                                if (loadedCount === images.length) resolve();
+                            };
+                        }
+                    });
+                    
+                    if (loadedCount === images.length) resolve();
+                });
+            }
+            
+            // 初始化
+            preloadImages().then(() => {
+                // 窗口大小改变时重新捕获
+                window.addEventListener('resize', () => {
+                    captureAndProcess();
+                });
+                
+                // 初始捕获
+                captureAndProcess();
+
+                // 动画
+                var step = 0;
+                function animationLoop() {
+                    oneStep();
+
+                    material.uniforms.particles.value = particles.location.map(e => new THREE.Vector2(e[0], liquidCanvas.clientHeight - e[1]));
+                    if (step % 2 == 0)  // 每多帧截图一次，这是为了提升性能，因为截图是昂贵的操作
+                        captureAndProcess();
+                    else
+                        render(texture);
+                    
+                    drawParticles(particles);  // 绘制粒子和速度，用于调试
+
+                    step ++;
+                    requestAnimationFrame(animationLoop);
+                }
+                animationLoop();
+            });
+        });
+    </script>
+</body>
+</html>
